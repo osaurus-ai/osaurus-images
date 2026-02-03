@@ -864,7 +864,7 @@ nonisolated(unsafe) private var api: osr_plugin_api = {
     makeCString(
       """
       {
-        "plugin_id": "dev.osaurus.images",
+        "plugin_id": "osaurus.images",
         "name": "Osaurus Images",
         "version": "0.1.0",
         "description": "Image manipulation, conversion, and optimization tools",

@@ -349,15 +349,15 @@ osaurus manifest extract .build/release/libosaurus-images.dylib
 ### Package for Distribution
 
 ```bash
-osaurus tools package dev.osaurus.images 0.1.0
+osaurus tools package osaurus.images 0.1.0
 ```
 
-Creates `dev.osaurus.images-0.1.0.zip`.
+Creates `osaurus.images-0.1.0.zip`.
 
 ### Install Locally
 
 ```bash
-osaurus tools install ./dev.osaurus.images-0.1.0.zip
+osaurus tools install ./osaurus.images-0.1.0.zip
 ```
 
 ---
