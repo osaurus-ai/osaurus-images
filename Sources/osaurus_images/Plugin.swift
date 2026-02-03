@@ -37,10 +37,44 @@ private func escapeJSON(_ string: String) -> String {
   }
 }
 
+// MARK: - Folder Context
+
+private struct FolderContext: Decodable {
+  let working_directory: String
+}
+
 // MARK: - Path & File Helpers
 
 private func normalizePath(_ path: String) -> String {
   ((path as NSString).expandingTildeInPath as NSString).standardizingPath
+}
+
+private enum PathResult {
+  case success(String)
+  case failure(String)
+}
+
+private func resolvePath(_ path: String, context: FolderContext?) -> PathResult {
+  // If no context, assume absolute path
+  guard let workingDir = context?.working_directory else {
+    return .success(normalizePath(path))
+  }
+
+  // Resolve path relative to working directory
+  let resolvedPath: String
+  if path.hasPrefix("/") || path.hasPrefix("~") {
+    resolvedPath = normalizePath(path)
+  } else {
+    resolvedPath = normalizePath("\(workingDir)/\(path)")
+  }
+
+  // Security: ensure path stays within working directory
+  let normalizedWorkingDir = normalizePath(workingDir)
+  guard resolvedPath.hasPrefix(normalizedWorkingDir) else {
+    return .failure("Path outside working directory")
+  }
+
+  return .success(resolvedPath)
 }
 
 private func fileExists(_ path: String) -> Bool {
@@ -135,6 +169,7 @@ private func withImage<T: Decodable>(
   _ args: String,
   as type: T.Type,
   path keyPath: KeyPath<T, String>,
+  context contextPath: KeyPath<T, FolderContext?>,
   execute: (T, CGImage, String, UTType) -> String
 ) -> String {
   guard let data = args.data(using: .utf8),
@@ -142,7 +177,11 @@ private func withImage<T: Decodable>(
   else {
     return jsonError("Invalid arguments")
   }
-  let path = normalizePath(input[keyPath: keyPath])
+  let path: String
+  switch resolvePath(input[keyPath: keyPath], context: input[keyPath: contextPath]) {
+  case .failure(let error): return jsonError(error)
+  case .success(let resolved): path = resolved
+  }
   switch loadImage(path) {
   case .failure(let error): return jsonError(error)
   case .success(let image):
@@ -159,8 +198,10 @@ private func convertImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let output_format: String
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, _ in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, _ in
     guard let format = formatFromExt(input.output_format) else {
       return jsonError("Unsupported format: \(input.output_format)")
     }
@@ -177,8 +218,10 @@ private func optimizeImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let quality: Double?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     let originalSize = fileSize(path)
     guard saveImage(image, to: path, format: format, quality: CGFloat(input.quality ?? 0.8)) else {
       return jsonError("Failed to optimize image")
@@ -194,8 +237,10 @@ private func rotateImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let degrees: Double
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     let radians = input.degrees * .pi / 180.0
     let (w, h) = (image.width, image.height)
     let norm = ((Int(input.degrees) % 360) + 360) % 360
@@ -229,8 +274,10 @@ private func flipImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let direction: String
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     let dir = input.direction.lowercased()
     guard dir == "horizontal" || dir == "vertical" else {
       return jsonError("Direction must be 'horizontal' or 'vertical'")
@@ -261,8 +308,10 @@ private func cropImage(_ args: String) -> String {
     let y: Int
     let width: Int
     let height: Int
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     guard input.x >= 0, input.y >= 0, input.width > 0, input.height > 0 else {
       return jsonError("Invalid crop dimensions")
     }
@@ -286,8 +335,10 @@ private func resizeImage(_ args: String) -> String {
     let width: Int?
     let height: Int?
     let scale: Double?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     let (origW, origH) = (image.width, image.height)
     let (newW, newH): (Int, Int)
 
@@ -320,13 +371,20 @@ private func resizeImage(_ args: String) -> String {
 }
 
 private func getImageInfo(_ args: String) -> String {
-  struct Args: Decodable { let input_path: String }
+  struct Args: Decodable {
+    let input_path: String
+    let _context: FolderContext?
+  }
   guard let data = args.data(using: .utf8),
     let input = try? JSONDecoder().decode(Args.self, from: data)
   else {
     return jsonError("Invalid arguments")
   }
-  let path = normalizePath(input.input_path)
+  let path: String
+  switch resolvePath(input.input_path, context: input._context) {
+  case .failure(let error): return jsonError(error)
+  case .success(let resolved): path = resolved
+  }
   guard fileExists(path) else { return jsonError("File not found: \(path)") }
 
   let url = URL(fileURLWithPath: path)
@@ -372,8 +430,12 @@ private func getImageInfo(_ args: String) -> String {
 }
 
 private func stripMetadata(_ args: String) -> String {
-  struct Args: Decodable { let input_path: String }
-  return withImage(args, as: Args.self, path: \.input_path) { _, image, path, format in
+  struct Args: Decodable {
+    let input_path: String
+    let _context: FolderContext?
+  }
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    _, image, path, format in
     guard
       let dest = CGImageDestinationCreateWithURL(
         URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
@@ -395,8 +457,10 @@ private func adjustColors(_ args: String) -> String {
     let brightness: Double?
     let contrast: Double?
     let saturation: Double?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     guard let filter = CIFilter(name: "CIColorControls") else {
       return jsonError("Failed to create filter")
     }
@@ -423,8 +487,10 @@ private func applyFilter(_ args: String) -> String {
     let input_path: String
     let filter: String
     let intensity: Double?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     let ciImage = CIImage(cgImage: image)
     let intensity = input.intensity ?? 1.0
     let (filterName, params): (String, [String: Any]) = {
@@ -465,8 +531,10 @@ private func extractColors(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let count: Int?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, _ in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, _ in
     guard let provider = image.dataProvider, let data = provider.data,
       let ptr = CFDataGetBytePtr(data)
     else {
@@ -500,8 +568,10 @@ private func addWatermark(_ args: String) -> String {
     let image_path: String?
     let position: String?
     let opacity: Double?
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     guard input.text != nil || input.image_path != nil else {
       return jsonError("Must specify text or image_path")
     }
@@ -540,7 +610,13 @@ private func addWatermark(_ args: String) -> String {
       ctx.textPosition = CGPoint(x: x, y: y)
       CTLineDraw(line, ctx)
     } else if let imgPath = input.image_path {
-      switch loadImage(imgPath) {
+      // Resolve watermark image path using context
+      let resolvedImgPath: String
+      switch resolvePath(imgPath, context: input._context) {
+      case .failure(let err): return jsonError("Watermark path: \(err)")
+      case .success(let resolved): resolvedImgPath = resolved
+      }
+      switch loadImage(resolvedImgPath) {
       case .failure(let err): return jsonError("Watermark: \(err)")
       case .success(let wm):
         let (x, y) = position(CGFloat(wm.width), CGFloat(wm.height))
@@ -562,22 +638,37 @@ private func compositeImages(_ args: String) -> String {
     let x: Int
     let y: Int
     let opacity: Double?
+    let _context: FolderContext?
   }
   guard let data = args.data(using: .utf8),
     let input = try? JSONDecoder().decode(Args.self, from: data)
   else {
     return jsonError("Invalid arguments")
   }
-  let basePath = normalizePath(input.base_path)
-  let overlayPath = normalizePath(input.overlay_path)
 
-  guard case .success(let base) = loadImage(basePath) else {
-    if case .failure(let err) = loadImage(basePath) { return jsonError("Base: \(err)") }
-    return jsonError("Failed to load base image")
+  // Resolve both paths using context
+  let basePath: String
+  switch resolvePath(input.base_path, context: input._context) {
+  case .failure(let err): return jsonError("Base path: \(err)")
+  case .success(let resolved): basePath = resolved
   }
-  guard case .success(let overlay) = loadImage(overlayPath) else {
-    if case .failure(let err) = loadImage(overlayPath) { return jsonError("Overlay: \(err)") }
-    return jsonError("Failed to load overlay image")
+
+  let overlayPath: String
+  switch resolvePath(input.overlay_path, context: input._context) {
+  case .failure(let err): return jsonError("Overlay path: \(err)")
+  case .success(let resolved): overlayPath = resolved
+  }
+
+  let base: CGImage
+  switch loadImage(basePath) {
+  case .failure(let err): return jsonError("Base: \(err)")
+  case .success(let img): base = img
+  }
+
+  let overlay: CGImage
+  switch loadImage(overlayPath) {
+  case .failure(let err): return jsonError("Overlay: \(err)")
+  case .success(let img): overlay = img
   }
   guard let format = imageFormat(basePath) else {
     return jsonError("Could not determine image format")
@@ -605,8 +696,10 @@ private func addBorder(_ args: String) -> String {
     let input_path: String
     let width: Int
     let color: String
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, format in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, format in
     guard let rgb = hexToRGB(input.color) else {
       return jsonError("Invalid color format. Use hex like #FF0000")
     }
@@ -632,8 +725,10 @@ private func roundCorners(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let radius: Int
+    let _context: FolderContext?
   }
-  return withImage(args, as: Args.self, path: \.input_path) { input, image, path, _ in
+  return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
+    input, image, path, _ in
     let (w, h) = (image.width, image.height)
     guard let ctx = createContext(w, h, image.colorSpace) else {
       return jsonError("Failed to create graphics context")
