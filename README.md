@@ -1,6 +1,6 @@
 # Osaurus Images
 
-A powerful image manipulation plugin for [Osaurus](https://osaurus.dev). Provides 15 tools for image conversion, manipulation, optimization, filtering, and composition.
+A powerful image manipulation plugin for [Osaurus](https://osaurus.ai). Provides 15 tools for image conversion, manipulation, optimization, filtering, and composition.
 
 ## Features
 
