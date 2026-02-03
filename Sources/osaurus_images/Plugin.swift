@@ -60,13 +60,11 @@ private func resolvePath(_ path: String, context: FolderContext?) -> PathResult 
     return .success(normalizePath(path))
   }
 
+  // Strip leading "/" if present (paths are always relative to working directory)
+  let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+
   // Resolve path relative to working directory
-  let resolvedPath: String
-  if path.hasPrefix("/") || path.hasPrefix("~") {
-    resolvedPath = normalizePath(path)
-  } else {
-    resolvedPath = normalizePath("\(workingDir)/\(path)")
-  }
+  let resolvedPath = normalizePath("\(workingDir)/\(cleanPath)")
 
   // Security: ensure path stays within working directory
   let normalizedWorkingDir = normalizePath(workingDir)
