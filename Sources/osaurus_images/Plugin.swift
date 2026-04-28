@@ -190,6 +190,29 @@ private func withImage<T: Decodable>(
   }
 }
 
+private func resolveOutputPath(_ outputPath: String?, fallback path: String, context: FolderContext?)
+  -> PathResult
+{
+  guard let outputPath, !outputPath.isEmpty else { return .success(path) }
+  return resolvePath(outputPath, context: context)
+}
+
+private func guardWritableOutput(_ path: String, overwrite: Bool?) -> String? {
+  if fileExists(path) && overwrite != true {
+    return jsonError("Output file already exists: \(path). Pass overwrite=true to replace it.")
+  }
+  return nil
+}
+
+private func dryRunWriteResult(_ path: String, dryRun: Bool?) -> String? {
+  guard dryRun == true else { return nil }
+  return jsonSuccess(["output_path": path, "would_overwrite": fileExists(path)])
+}
+
+private func writeFormat(for outputPath: String, fallback: UTType) -> UTType {
+  imageFormat(outputPath) ?? fallback
+}
+
 // MARK: - Tools
 
 private func convertImage(_ args: String) -> String {
@@ -235,10 +258,25 @@ private func rotateImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let degrees: Double
+    let output_path: String?
+    let overwrite: Bool?
+    let dry_run: Bool?
     let _context: FolderContext?
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    let outputPath: String
+    switch resolveOutputPath(input.output_path, fallback: path, context: input._context) {
+    case .failure(let error): return jsonError(error)
+    case .success(let resolved): outputPath = resolved
+    }
+    if let dryRun = dryRunWriteResult(outputPath, dryRun: input.dry_run) { return dryRun }
+    if input.output_path != nil,
+      let error = guardWritableOutput(outputPath, overwrite: input.overwrite)
+    {
+      return error
+    }
+
     let radians = input.degrees * .pi / 180.0
     let (w, h) = (image.width, image.height)
     let norm = ((Int(input.degrees) % 360) + 360) % 360
@@ -261,10 +299,11 @@ private func rotateImage(_ args: String) -> String {
     ctx.translateBy(x: CGFloat(-w) / 2, y: CGFloat(-h) / 2)
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-    guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
+    let outputFormat = writeFormat(for: outputPath, fallback: format)
+    guard let result = ctx.makeImage(), saveImage(result, to: outputPath, format: outputFormat) else {
       return jsonError("Failed to save rotated image")
     }
-    return jsonSuccess(["degrees": input.degrees])
+    return jsonSuccess(["degrees": input.degrees, "output_path": outputPath])
   }
 }
 
@@ -272,10 +311,25 @@ private func flipImage(_ args: String) -> String {
   struct Args: Decodable {
     let input_path: String
     let direction: String
+    let output_path: String?
+    let overwrite: Bool?
+    let dry_run: Bool?
     let _context: FolderContext?
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    let outputPath: String
+    switch resolveOutputPath(input.output_path, fallback: path, context: input._context) {
+    case .failure(let error): return jsonError(error)
+    case .success(let resolved): outputPath = resolved
+    }
+    if let dryRun = dryRunWriteResult(outputPath, dryRun: input.dry_run) { return dryRun }
+    if input.output_path != nil,
+      let error = guardWritableOutput(outputPath, overwrite: input.overwrite)
+    {
+      return error
+    }
+
     let dir = input.direction.lowercased()
     guard dir == "horizontal" || dir == "vertical" else {
       return jsonError("Direction must be 'horizontal' or 'vertical'")
@@ -292,10 +346,11 @@ private func flipImage(_ args: String) -> String {
       ctx.scaleBy(x: 1, y: -1)
     }
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-    guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
+    let outputFormat = writeFormat(for: outputPath, fallback: format)
+    guard let result = ctx.makeImage(), saveImage(result, to: outputPath, format: outputFormat) else {
       return jsonError("Failed to save flipped image")
     }
-    return jsonSuccess(["direction": dir])
+    return jsonSuccess(["direction": dir, "output_path": outputPath])
   }
 }
 
@@ -306,10 +361,25 @@ private func cropImage(_ args: String) -> String {
     let y: Int
     let width: Int
     let height: Int
+    let output_path: String?
+    let overwrite: Bool?
+    let dry_run: Bool?
     let _context: FolderContext?
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    let outputPath: String
+    switch resolveOutputPath(input.output_path, fallback: path, context: input._context) {
+    case .failure(let error): return jsonError(error)
+    case .success(let resolved): outputPath = resolved
+    }
+    if let dryRun = dryRunWriteResult(outputPath, dryRun: input.dry_run) { return dryRun }
+    if input.output_path != nil,
+      let error = guardWritableOutput(outputPath, overwrite: input.overwrite)
+    {
+      return error
+    }
+
     guard input.x >= 0, input.y >= 0, input.width > 0, input.height > 0 else {
       return jsonError("Invalid crop dimensions")
     }
@@ -319,11 +389,12 @@ private func cropImage(_ args: String) -> String {
     let rect = CGRect(
       x: input.x, y: image.height - input.y - input.height, width: input.width, height: input.height
     )
-    guard let cropped = image.cropping(to: rect), saveImage(cropped, to: path, format: format)
+    let outputFormat = writeFormat(for: outputPath, fallback: format)
+    guard let cropped = image.cropping(to: rect), saveImage(cropped, to: outputPath, format: outputFormat)
     else {
       return jsonError("Failed to crop image")
     }
-    return jsonSuccess(["width": input.width, "height": input.height])
+    return jsonSuccess(["width": input.width, "height": input.height, "output_path": outputPath])
   }
 }
 
@@ -333,10 +404,25 @@ private func resizeImage(_ args: String) -> String {
     let width: Int?
     let height: Int?
     let scale: Double?
+    let output_path: String?
+    let overwrite: Bool?
+    let dry_run: Bool?
     let _context: FolderContext?
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    let outputPath: String
+    switch resolveOutputPath(input.output_path, fallback: path, context: input._context) {
+    case .failure(let error): return jsonError(error)
+    case .success(let resolved): outputPath = resolved
+    }
+    if let dryRun = dryRunWriteResult(outputPath, dryRun: input.dry_run) { return dryRun }
+    if input.output_path != nil,
+      let error = guardWritableOutput(outputPath, overwrite: input.overwrite)
+    {
+      return error
+    }
+
     let (origW, origH) = (image.width, image.height)
     let (newW, newH): (Int, Int)
 
@@ -361,10 +447,11 @@ private func resizeImage(_ args: String) -> String {
     }
     ctx.interpolationQuality = .high
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
-    guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
+    let outputFormat = writeFormat(for: outputPath, fallback: format)
+    guard let result = ctx.makeImage(), saveImage(result, to: outputPath, format: outputFormat) else {
       return jsonError("Failed to save resized image")
     }
-    return jsonSuccess(["width": newW, "height": newH])
+    return jsonSuccess(["width": newW, "height": newH, "output_path": outputPath])
   }
 }
 
@@ -785,10 +872,10 @@ private let manifest = """
       "tools": [
         {"id": "convert_image", "description": "Convert image format (png, jpeg, gif, tiff, bmp, heic, webp)", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "output_format": {"type": "string", "description": "Target format"}}, "required": ["input_path", "output_format"]}, "requirements": [], "permission_policy": "ask"},
         {"id": "optimize_image", "description": "Optimize image file size", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "quality": {"type": "number", "description": "Quality 0.0-1.0 (default: 0.8)"}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "ask"},
-        {"id": "rotate_image", "description": "Rotate image by degrees", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "degrees": {"type": "number", "description": "Rotation degrees (positive = counter-clockwise)"}}, "required": ["input_path", "degrees"]}, "requirements": [], "permission_policy": "ask"},
-        {"id": "flip_image", "description": "Flip image horizontally or vertically", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "direction": {"type": "string", "description": "horizontal or vertical"}}, "required": ["input_path", "direction"]}, "requirements": [], "permission_policy": "ask"},
-        {"id": "crop_image", "description": "Crop image to region", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "x": {"type": "integer", "description": "X of top-left"}, "y": {"type": "integer", "description": "Y of top-left"}, "width": {"type": "integer", "description": "Crop width"}, "height": {"type": "integer", "description": "Crop height"}}, "required": ["input_path", "x", "y", "width", "height"]}, "requirements": [], "permission_policy": "ask"},
-        {"id": "resize_image", "description": "Resize image", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "width": {"type": "integer", "description": "New width"}, "height": {"type": "integer", "description": "New height"}, "scale": {"type": "number", "description": "Scale percentage"}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "ask"},
+        {"id": "rotate_image", "description": "Rotate image by degrees", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "degrees": {"type": "number", "description": "Rotation degrees (positive = counter-clockwise)"}, "output_path": {"type": "string", "description": "Optional output image path. Defaults to input_path for compatibility."}, "overwrite": {"type": "boolean", "description": "Replace existing output file. Default: false."}, "dry_run": {"type": "boolean", "description": "Validate output path and report overwrite status without writing."}}, "required": ["input_path", "degrees"]}, "requirements": [], "permission_policy": "ask"},
+        {"id": "flip_image", "description": "Flip image horizontally or vertically", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "direction": {"type": "string", "description": "horizontal or vertical"}, "output_path": {"type": "string", "description": "Optional output image path. Defaults to input_path for compatibility."}, "overwrite": {"type": "boolean", "description": "Replace existing output file. Default: false."}, "dry_run": {"type": "boolean", "description": "Validate output path and report overwrite status without writing."}}, "required": ["input_path", "direction"]}, "requirements": [], "permission_policy": "ask"},
+        {"id": "crop_image", "description": "Crop image to region", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "x": {"type": "integer", "description": "X of top-left"}, "y": {"type": "integer", "description": "Y of top-left"}, "width": {"type": "integer", "description": "Crop width"}, "height": {"type": "integer", "description": "Crop height"}, "output_path": {"type": "string", "description": "Optional output image path. Defaults to input_path for compatibility."}, "overwrite": {"type": "boolean", "description": "Replace existing output file. Default: false."}, "dry_run": {"type": "boolean", "description": "Validate output path and report overwrite status without writing."}}, "required": ["input_path", "x", "y", "width", "height"]}, "requirements": [], "permission_policy": "ask"},
+        {"id": "resize_image", "description": "Resize image", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "width": {"type": "integer", "description": "New width"}, "height": {"type": "integer", "description": "New height"}, "scale": {"type": "number", "description": "Scale percentage"}, "output_path": {"type": "string", "description": "Optional output image path. Defaults to input_path for compatibility."}, "overwrite": {"type": "boolean", "description": "Replace existing output file. Default: false."}, "dry_run": {"type": "boolean", "description": "Validate output path and report overwrite status without writing."}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "ask"},
         {"id": "get_image_info", "description": "Get image metadata", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "auto"},
         {"id": "strip_metadata", "description": "Remove EXIF metadata", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "ask"},
         {"id": "adjust_colors", "description": "Adjust brightness/contrast/saturation", "parameters": {"type": "object", "properties": {"input_path": {"type": "string", "description": "Path to input image"}, "brightness": {"type": "number", "description": "-1.0 to 1.0"}, "contrast": {"type": "number", "description": "0.0 to 2.0"}, "saturation": {"type": "number", "description": "0.0 to 2.0"}}, "required": ["input_path"]}, "requirements": [], "permission_policy": "ask"},
