@@ -119,4 +119,22 @@ struct ManifestTests {
     #expect(compositeRequired.contains("base_path"))
     #expect(compositeRequired.contains("overlay_path"))
   }
+
+  @Test("core transform tools expose optional output controls")
+  func outputControls() throws {
+    let manifest = try loadManifest()
+    let toolMap = Dictionary(
+      uniqueKeysWithValues: tools(from: manifest).compactMap { tool -> (String, [String: Any])? in
+        guard let id = tool["id"] as? String else { return nil }
+        return (id, tool)
+      })
+
+    for id in ["rotate_image", "flip_image", "crop_image", "resize_image"] {
+      let params = toolMap[id]?["parameters"] as? [String: Any]
+      let properties = params?["properties"] as? [String: Any]
+      #expect(properties?["output_path"] != nil, "Tool '\(id)' should expose output_path")
+      #expect(properties?["overwrite"] != nil, "Tool '\(id)' should expose overwrite")
+      #expect(properties?["dry_run"] != nil, "Tool '\(id)' should expose dry_run")
+    }
+  }
 }
