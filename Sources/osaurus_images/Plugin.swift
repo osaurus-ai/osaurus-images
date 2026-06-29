@@ -6,10 +6,6 @@ import UniformTypeIdentifiers
 
 // MARK: - JSON Helpers
 
-private func jsonError(_ message: String) -> String {
-  "{\"error\": \"\(escapeJSON(message))\"}"
-}
-
 private func jsonSuccess(_ fields: [String: Any] = [:]) -> String {
   var parts = ["\"success\": true"]
   for (key, value) in fields {
@@ -87,19 +83,19 @@ private func fileSize(_ path: String) -> Int {
 
 private enum ImageResult {
   case success(CGImage)
-  case failure(String)
+  case failure(Envelope.Kind, String)
 }
 
 private func loadImage(_ path: String) -> ImageResult {
   let path = normalizePath(path)
   guard fileExists(path) else {
-    return .failure("File not found: \(path)")
+    return .failure(.notFound, "File not found: \(path)")
   }
   guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else {
-    return .failure("Cannot read image file: \(path)")
+    return .failure(.executionError, "Cannot read image file: \(path)")
   }
   guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-    return .failure("Failed to decode image: \(path)")
+    return .failure(.executionError, "Failed to decode image: \(path)")
   }
   return .success(image)
 }
@@ -173,18 +169,22 @@ private func withImage<T: Decodable>(
   guard let data = args.data(using: .utf8),
     let input = try? JSONDecoder().decode(type, from: data)
   else {
-    return jsonError("Invalid arguments")
+    return Envelope.failure(.invalidArgs, "Invalid arguments")
+  }
+  let rawPath = input[keyPath: keyPath]
+  guard !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    return Envelope.failure(.invalidArgs, "input path must not be empty")
   }
   let path: String
-  switch resolvePath(input[keyPath: keyPath], context: input[keyPath: contextPath]) {
-  case .failure(let error): return jsonError(error)
+  switch resolvePath(rawPath, context: input[keyPath: contextPath]) {
+  case .failure(let error): return Envelope.failure(.invalidArgs, error)
   case .success(let resolved): path = resolved
   }
   switch loadImage(path) {
-  case .failure(let error): return jsonError(error)
+  case .failure(let kind, let error): return Envelope.failure(kind, error)
   case .success(let image):
     guard let format = imageFormat(path) else {
-      return jsonError("Could not determine image format")
+      return Envelope.failure(.invalidArgs, "Could not determine image format")
     }
     return execute(input, image, path, format)
   }
@@ -201,12 +201,12 @@ private func convertImage(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, _ in
     guard let format = formatFromExt(input.output_format) else {
-      return jsonError("Unsupported format: \(input.output_format)")
+      return Envelope.failure(.invalidArgs, "Unsupported format: \(input.output_format)")
     }
     let output = URL(fileURLWithPath: path).deletingPathExtension()
       .appendingPathExtension(input.output_format.lowercased()).path
     guard saveImage(image, to: output, format: format) else {
-      return jsonError("Failed to save: \(output)")
+      return Envelope.failure(.executionError, "Failed to save: \(output)")
     }
     return jsonSuccess(["output_path": output])
   }
@@ -220,9 +220,12 @@ private func optimizeImage(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let q = input.quality, !(q >= 0.0 && q <= 1.0) {
+      return Envelope.failure(.invalidArgs, "quality must be between 0.0 and 1.0")
+    }
     let originalSize = fileSize(path)
     guard saveImage(image, to: path, format: format, quality: CGFloat(input.quality ?? 0.8)) else {
-      return jsonError("Failed to optimize image")
+      return Envelope.failure(.executionError, "Failed to optimize image")
     }
     let newSize = fileSize(path)
     return jsonSuccess([
@@ -239,6 +242,9 @@ private func rotateImage(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    guard input.degrees.isFinite else {
+      return Envelope.failure(.invalidArgs, "degrees must be a finite number")
+    }
     let radians = input.degrees * .pi / 180.0
     let (w, h) = (image.width, image.height)
     let norm = ((Int(input.degrees) % 360) + 360) % 360
@@ -254,7 +260,7 @@ private func rotateImage(_ args: String) -> String {
     }()
 
     guard let ctx = createContext(newW, newH, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     ctx.translateBy(x: CGFloat(newW) / 2, y: CGFloat(newH) / 2)
     ctx.rotate(by: CGFloat(radians))
@@ -262,7 +268,7 @@ private func rotateImage(_ args: String) -> String {
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
     guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
-      return jsonError("Failed to save rotated image")
+      return Envelope.failure(.executionError, "Failed to save rotated image")
     }
     return jsonSuccess(["degrees": input.degrees])
   }
@@ -278,11 +284,11 @@ private func flipImage(_ args: String) -> String {
     input, image, path, format in
     let dir = input.direction.lowercased()
     guard dir == "horizontal" || dir == "vertical" else {
-      return jsonError("Direction must be 'horizontal' or 'vertical'")
+      return Envelope.failure(.invalidArgs, "Direction must be 'horizontal' or 'vertical'")
     }
     let (w, h) = (image.width, image.height)
     guard let ctx = createContext(w, h, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     if dir == "horizontal" {
       ctx.translateBy(x: CGFloat(w), y: 0)
@@ -293,7 +299,7 @@ private func flipImage(_ args: String) -> String {
     }
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
     guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
-      return jsonError("Failed to save flipped image")
+      return Envelope.failure(.executionError, "Failed to save flipped image")
     }
     return jsonSuccess(["direction": dir])
   }
@@ -311,17 +317,17 @@ private func cropImage(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
     guard input.x >= 0, input.y >= 0, input.width > 0, input.height > 0 else {
-      return jsonError("Invalid crop dimensions")
+      return Envelope.failure(.invalidArgs, "Invalid crop dimensions")
     }
     guard input.x + input.width <= image.width, input.y + input.height <= image.height else {
-      return jsonError("Crop region exceeds image bounds")
+      return Envelope.failure(.invalidArgs, "Crop region exceeds image bounds")
     }
     let rect = CGRect(
       x: input.x, y: image.height - input.y - input.height, width: input.width, height: input.height
     )
     guard let cropped = image.cropping(to: rect), saveImage(cropped, to: path, format: format)
     else {
-      return jsonError("Failed to crop image")
+      return Envelope.failure(.executionError, "Failed to crop image")
     }
     return jsonSuccess(["width": input.width, "height": input.height])
   }
@@ -337,6 +343,15 @@ private func resizeImage(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let w = input.width, w <= 0 {
+      return Envelope.failure(.invalidArgs, "width must be a positive integer")
+    }
+    if let h = input.height, h <= 0 {
+      return Envelope.failure(.invalidArgs, "height must be a positive integer")
+    }
+    if let s = input.scale, !(s.isFinite && s > 0) {
+      return Envelope.failure(.invalidArgs, "scale must be a positive number")
+    }
     let (origW, origH) = (image.width, image.height)
     let (newW, newH): (Int, Int)
 
@@ -352,17 +367,17 @@ private func resizeImage(_ args: String) -> String {
       newH = h
       newW = Int(Double(origW) * Double(h) / Double(origH))
     } else {
-      return jsonError("Must specify width, height, or scale")
+      return Envelope.failure(.invalidArgs, "Must specify width, height, or scale")
     }
 
-    guard newW > 0, newH > 0 else { return jsonError("Invalid dimensions") }
+    guard newW > 0, newH > 0 else { return Envelope.failure(.invalidArgs, "Invalid dimensions") }
     guard let ctx = createContext(newW, newH, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     ctx.interpolationQuality = .high
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
     guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
-      return jsonError("Failed to save resized image")
+      return Envelope.failure(.executionError, "Failed to save resized image")
     }
     return jsonSuccess(["width": newW, "height": newH])
   }
@@ -376,20 +391,23 @@ private func getImageInfo(_ args: String) -> String {
   guard let data = args.data(using: .utf8),
     let input = try? JSONDecoder().decode(Args.self, from: data)
   else {
-    return jsonError("Invalid arguments")
+    return Envelope.failure(.invalidArgs, "Invalid arguments")
+  }
+  guard !input.input_path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    return Envelope.failure(.invalidArgs, "input path must not be empty")
   }
   let path: String
   switch resolvePath(input.input_path, context: input._context) {
-  case .failure(let error): return jsonError(error)
+  case .failure(let error): return Envelope.failure(.invalidArgs, error)
   case .success(let resolved): path = resolved
   }
-  guard fileExists(path) else { return jsonError("File not found: \(path)") }
+  guard fileExists(path) else { return Envelope.failure(.notFound, "File not found: \(path)") }
 
   let url = URL(fileURLWithPath: path)
   guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
     let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
   else {
-    return jsonError("Failed to read image properties: \(path)")
+    return Envelope.failure(.executionError, "Failed to read image properties: \(path)")
   }
 
   let width = props[kCGImagePropertyPixelWidth] as? Int ?? 0
@@ -439,11 +457,11 @@ private func stripMetadata(_ args: String) -> String {
         URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
       )
     else {
-      return jsonError("Failed to create image destination")
+      return Envelope.failure(.executionError, "Failed to create image destination")
     }
     CGImageDestinationAddImage(dest, image, nil)
     guard CGImageDestinationFinalize(dest) else {
-      return jsonError("Failed to save image")
+      return Envelope.failure(.executionError, "Failed to save image")
     }
     return jsonSuccess(["message": "Metadata stripped successfully"])
   }
@@ -460,7 +478,7 @@ private func adjustColors(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
     guard let filter = CIFilter(name: "CIColorControls") else {
-      return jsonError("Failed to create filter")
+      return Envelope.failure(.executionError, "Failed to create filter")
     }
     filter.setValue(CIImage(cgImage: image), forKey: kCIInputImageKey)
     if let b = input.brightness { filter.setValue(b, forKey: kCIInputBrightnessKey) }
@@ -471,7 +489,7 @@ private func adjustColors(_ args: String) -> String {
       let result = CIContext().createCGImage(output, from: output.extent),
       saveImage(result, to: path, format: format)
     else {
-      return jsonError("Failed to apply color adjustments")
+      return Envelope.failure(.executionError, "Failed to apply color adjustments")
     }
     return jsonSuccess([
       "brightness": input.brightness ?? 0, "contrast": input.contrast ?? 1,
@@ -506,20 +524,23 @@ private func applyFilter(_ args: String) -> String {
     }()
 
     guard !filterName.isEmpty else {
-      return jsonError(
+      return Envelope.failure(
+        .invalidArgs,
         "Unknown filter: \(input.filter). Supported: grayscale, sepia, blur, sharpen, invert")
     }
     guard let filter = CIFilter(name: filterName) else {
-      return jsonError("Failed to create filter")
+      return Envelope.failure(.executionError, "Failed to create filter")
     }
     params.forEach { filter.setValue($0.value, forKey: $0.key) }
 
-    guard let output = filter.outputImage else { return jsonError("Failed to apply filter") }
+    guard let output = filter.outputImage else {
+      return Envelope.failure(.executionError, "Failed to apply filter")
+    }
     let extent = input.filter.lowercased() == "blur" ? ciImage.extent : output.extent
     guard let result = CIContext().createCGImage(output, from: extent),
       saveImage(result, to: path, format: format)
     else {
-      return jsonError("Failed to save filtered image")
+      return Envelope.failure(.executionError, "Failed to save filtered image")
     }
     return jsonSuccess(["filter": input.filter])
   }
@@ -533,10 +554,13 @@ private func extractColors(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, _ in
+    if let c = input.count, c <= 0 {
+      return Envelope.failure(.invalidArgs, "count must be a positive integer")
+    }
     guard let provider = image.dataProvider, let data = provider.data,
       let ptr = CFDataGetBytePtr(data)
     else {
-      return jsonError("Failed to read image data")
+      return Envelope.failure(.executionError, "Failed to read image data")
     }
     let count = input.count ?? 5
     let (w, h) = (image.width, image.height)
@@ -571,7 +595,10 @@ private func addWatermark(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
     guard input.text != nil || input.image_path != nil else {
-      return jsonError("Must specify text or image_path")
+      return Envelope.failure(.invalidArgs, "Must specify text or image_path")
+    }
+    if let o = input.opacity, !(o >= 0.0 && o <= 1.0) {
+      return Envelope.failure(.invalidArgs, "opacity must be between 0.0 and 1.0")
     }
     let (w, h) = (image.width, image.height)
     let opacity = CGFloat(input.opacity ?? 0.5)
@@ -579,7 +606,7 @@ private func addWatermark(_ args: String) -> String {
     let pad: CGFloat = 20
 
     guard let ctx = createContext(w, h, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
     ctx.setAlpha(opacity)
@@ -611,11 +638,11 @@ private func addWatermark(_ args: String) -> String {
       // Resolve watermark image path using context
       let resolvedImgPath: String
       switch resolvePath(imgPath, context: input._context) {
-      case .failure(let err): return jsonError("Watermark path: \(err)")
+      case .failure(let err): return Envelope.failure(.invalidArgs, "Watermark path: \(err)")
       case .success(let resolved): resolvedImgPath = resolved
       }
       switch loadImage(resolvedImgPath) {
-      case .failure(let err): return jsonError("Watermark: \(err)")
+      case .failure(let kind, let err): return Envelope.failure(kind, "Watermark: \(err)")
       case .success(let wm):
         let (x, y) = position(CGFloat(wm.width), CGFloat(wm.height))
         ctx.draw(wm, in: CGRect(x: x, y: y, width: CGFloat(wm.width), height: CGFloat(wm.height)))
@@ -623,7 +650,7 @@ private func addWatermark(_ args: String) -> String {
     }
 
     guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
-      return jsonError("Failed to save watermarked image")
+      return Envelope.failure(.executionError, "Failed to save watermarked image")
     }
     return jsonSuccess(["position": pos])
   }
@@ -641,40 +668,49 @@ private func compositeImages(_ args: String) -> String {
   guard let data = args.data(using: .utf8),
     let input = try? JSONDecoder().decode(Args.self, from: data)
   else {
-    return jsonError("Invalid arguments")
+    return Envelope.failure(.invalidArgs, "Invalid arguments")
+  }
+  guard !input.base_path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    return Envelope.failure(.invalidArgs, "base_path must not be empty")
+  }
+  guard !input.overlay_path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    return Envelope.failure(.invalidArgs, "overlay_path must not be empty")
+  }
+  if let o = input.opacity, !(o >= 0.0 && o <= 1.0) {
+    return Envelope.failure(.invalidArgs, "opacity must be between 0.0 and 1.0")
   }
 
   // Resolve both paths using context
   let basePath: String
   switch resolvePath(input.base_path, context: input._context) {
-  case .failure(let err): return jsonError("Base path: \(err)")
+  case .failure(let err): return Envelope.failure(.invalidArgs, "Base path: \(err)")
   case .success(let resolved): basePath = resolved
   }
 
   let overlayPath: String
   switch resolvePath(input.overlay_path, context: input._context) {
-  case .failure(let err): return jsonError("Overlay path: \(err)")
+  case .failure(let err): return Envelope.failure(.invalidArgs, "Overlay path: \(err)")
   case .success(let resolved): overlayPath = resolved
   }
 
   let base: CGImage
   switch loadImage(basePath) {
-  case .failure(let err): return jsonError("Base: \(err)")
+  case .failure(let kind, let err): return Envelope.failure(kind, "Base: \(err)")
   case .success(let img): base = img
   }
 
   let overlay: CGImage
   switch loadImage(overlayPath) {
-  case .failure(let err): return jsonError("Overlay: \(err)")
+  case .failure(let kind, let err): return Envelope.failure(kind, "Overlay: \(err)")
   case .success(let img): overlay = img
   }
   guard let format = imageFormat(basePath) else {
-    return jsonError("Could not determine image format")
+    return Envelope.failure(.invalidArgs, "Could not determine image format")
   }
 
   let (w, h) = (base.width, base.height)
   guard let ctx = createContext(w, h, base.colorSpace) else {
-    return jsonError("Failed to create graphics context")
+    return Envelope.failure(.executionError, "Failed to create graphics context")
   }
   ctx.draw(base, in: CGRect(x: 0, y: 0, width: w, height: h))
   ctx.setAlpha(CGFloat(input.opacity ?? 1.0))
@@ -684,7 +720,7 @@ private func compositeImages(_ args: String) -> String {
       x: input.x, y: h - input.y - overlay.height, width: overlay.width, height: overlay.height))
 
   guard let result = ctx.makeImage(), saveImage(result, to: basePath, format: format) else {
-    return jsonError("Failed to save composited image")
+    return Envelope.failure(.executionError, "Failed to save composited image")
   }
   return jsonSuccess(["x": input.x, "y": input.y])
 }
@@ -698,22 +734,25 @@ private func addBorder(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    guard input.width > 0 else {
+      return Envelope.failure(.invalidArgs, "width must be a positive integer")
+    }
     guard let rgb = hexToRGB(input.color) else {
-      return jsonError("Invalid color format. Use hex like #FF0000")
+      return Envelope.failure(.invalidArgs, "Invalid color format. Use hex like #FF0000")
     }
     let border = input.width
     let (imgW, imgH) = (image.width, image.height)
     let (newW, newH) = (imgW + border * 2, imgH + border * 2)
 
     guard let ctx = createContext(newW, newH, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     ctx.setFillColor(CGColor(red: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1))
     ctx.fill(CGRect(x: 0, y: 0, width: newW, height: newH))
     ctx.draw(image, in: CGRect(x: border, y: border, width: imgW, height: imgH))
 
     guard let result = ctx.makeImage(), saveImage(result, to: path, format: format) else {
-      return jsonError("Failed to save bordered image")
+      return Envelope.failure(.executionError, "Failed to save bordered image")
     }
     return jsonSuccess(["border_width": border, "new_width": newW, "new_height": newH])
   }
@@ -727,9 +766,12 @@ private func roundCorners(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, _ in
+    guard input.radius >= 0 else {
+      return Envelope.failure(.invalidArgs, "radius must be a non-negative integer")
+    }
     let (w, h) = (image.width, image.height)
     guard let ctx = createContext(w, h, image.colorSpace) else {
-      return jsonError("Failed to create graphics context")
+      return Envelope.failure(.executionError, "Failed to create graphics context")
     }
     let rect = CGRect(x: 0, y: 0, width: w, height: h)
     let r = CGFloat(input.radius)
@@ -738,14 +780,14 @@ private func roundCorners(_ args: String) -> String {
     ctx.draw(image, in: rect)
 
     guard let result = ctx.makeImage() else {
-      return jsonError("Failed to create rounded image")
+      return Envelope.failure(.executionError, "Failed to create rounded image")
     }
     let output =
       path.lowercased().hasSuffix(".png")
       ? path
       : URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("png").path
     guard saveImage(result, to: output, format: .png) else {
-      return jsonError("Failed to save image")
+      return Envelope.failure(.executionError, "Failed to save image")
     }
     return jsonSuccess(["radius": input.radius, "output_path": output])
   }
@@ -771,10 +813,10 @@ nonisolated(unsafe) private let tools: [String: (String) -> String] = [
   "round_corners": roundCorners,
 ]
 
-private let manifest = """
+let imagesManifestJSON = """
   {
     "plugin_id": "osaurus.images",
-    "name": "Osaurus Images",
+    "name": "Images",
     "version": "0.1.0",
     "description": "Image manipulation, conversion, and optimization tools",
     "license": "MIT",
@@ -833,14 +875,18 @@ nonisolated(unsafe) private var api: PluginAPI = {
   api.free_string = { if let p = $0 { free(UnsafeMutableRawPointer(mutating: p)) } }
   api.`init` = { Unmanaged.passRetained(PluginContext()).toOpaque() }
   api.destroy = { if let p = $0 { Unmanaged<PluginContext>.fromOpaque(p).release() } }
-  api.get_manifest = { _ in makeCString(manifest) }
+  api.get_manifest = { _ in makeCString(imagesManifestJSON) }
   api.invoke = { _, typePtr, idPtr, payloadPtr in
     guard let typePtr, let idPtr, let payloadPtr else { return nil }
     let type = String(cString: typePtr)
     let id = String(cString: idPtr)
     let payload = String(cString: payloadPtr)
-    guard type == "tool" else { return makeCString(jsonError("Unknown capability type")) }
-    guard let tool = tools[id] else { return makeCString(jsonError("Unknown tool: \(id)")) }
+    guard type == "tool" else {
+      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type"))
+    }
+    guard let tool = tools[id] else {
+      return makeCString(Envelope.failure(.notFound, "Unknown tool: \(id)"))
+    }
     return makeCString(tool(payload))
   }
   return api

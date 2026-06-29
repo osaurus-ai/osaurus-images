@@ -1,6 +1,6 @@
-# Osaurus Images
+# Images
 
-A powerful image manipulation plugin for [Osaurus](https://osaurus.ai). Provides 15 tools for image conversion, manipulation, optimization, filtering, and composition.
+A powerful image manipulation plugin for [Osaurus](https://osaurus.ai). Provides 15 tools for image conversion, manipulation, optimization, filtering, and composition. The plugin's display name is **Images** (plugin id `osaurus.images`).
 
 ## Features
 
