@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import ImageIO
+import OsaurusPluginABI
 import OsaurusPluginKit
 import UniformTypeIdentifiers
 
@@ -887,54 +888,36 @@ let imagesManifestJSON = """
   }
   """
 
-private func makeCString(_ s: String) -> UnsafePointer<CChar>? {
-  guard let ptr = strdup(s) else { return nil }
-  return UnsafePointer(ptr)
-}
-
-private typealias PluginCtx = UnsafeMutableRawPointer
-private typealias FreeStringFn = @convention(c) (UnsafePointer<CChar>?) -> Void
-private typealias InitFn = @convention(c) () -> PluginCtx?
-private typealias DestroyFn = @convention(c) (PluginCtx?) -> Void
-private typealias ManifestFn = @convention(c) (PluginCtx?) -> UnsafePointer<CChar>?
-private typealias InvokeFn =
-  @convention(c) (PluginCtx?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?)
-  -> UnsafePointer<CChar>?
-
-private struct PluginAPI {
-  var free_string: FreeStringFn?
-  var `init`: InitFn?
-  var destroy: DestroyFn?
-  var get_manifest: ManifestFn?
-  var invoke: InvokeFn?
-}
-
 // Dummy context - we don't need state but API requires non-nil
 private class PluginContext {}
 
-nonisolated(unsafe) private var api: PluginAPI = {
-  var api = PluginAPI()
-  api.free_string = { if let p = $0 { free(UnsafeMutableRawPointer(mutating: p)) } }
-  api.`init` = { Unmanaged.passRetained(PluginContext()).toOpaque() }
-  api.destroy = { if let p = $0 { Unmanaged<PluginContext>.fromOpaque(p).release() } }
-  api.get_manifest = { _ in makeCString(imagesManifestJSON) }
-  api.invoke = { _, typePtr, idPtr, payloadPtr in
+/// Stable storage for the plugin API table (the host keeps the pointer).
+nonisolated(unsafe) private var api = PluginEntry.makeAPI(
+  version: OsrABIVersion.v2,
+  init: { Unmanaged.passRetained(PluginContext()).toOpaque() },
+  destroy: { ctx in ctx.map { Unmanaged<PluginContext>.fromOpaque($0).release() } },
+  getManifest: { _ in osrMakeCString(imagesManifestJSON) },
+  invoke: { _, typePtr, idPtr, payloadPtr in
     guard let typePtr, let idPtr, let payloadPtr else { return nil }
     let type = String(cString: typePtr)
     let id = String(cString: idPtr)
     let payload = String(cString: payloadPtr)
     guard type == "tool" else {
-      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type"))
+      return osrMakeCString(Envelope.failure(.invalidArgs, "Unknown capability type"))
     }
     guard let tool = tools[id] else {
-      return makeCString(Envelope.failure(.notFound, "Unknown tool: \(id)"))
+      return osrMakeCString(Envelope.failure(.notFound, "Unknown tool: \(id)"))
     }
-    return makeCString(tool(payload))
+    return osrMakeCString(tool(payload))
   }
-  return api
-}()
+)
+
+@_cdecl("osaurus_plugin_entry_v2")
+public func osaurus_plugin_entry_v2(_ host: UnsafeRawPointer?) -> UnsafeRawPointer? {
+  PluginEntry.enterV2(host, api: &api)
+}
 
 @_cdecl("osaurus_plugin_entry")
 public func osaurus_plugin_entry() -> UnsafeRawPointer? {
-  UnsafeRawPointer(&api)
+  PluginEntry.enterV1(api: &api)
 }
