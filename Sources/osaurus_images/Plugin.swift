@@ -522,6 +522,15 @@ private func adjustColors(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let b = input.brightness, !(b >= -1.0 && b <= 1.0) {
+      return Envelope.failure(.invalidArgs, "brightness must be between -1.0 and 1.0")
+    }
+    if let c = input.contrast, !(c >= 0.0 && c <= 2.0) {
+      return Envelope.failure(.invalidArgs, "contrast must be between 0.0 and 2.0")
+    }
+    if let s = input.saturation, !(s >= 0.0 && s <= 2.0) {
+      return Envelope.failure(.invalidArgs, "saturation must be between 0.0 and 2.0")
+    }
     guard let filter = CIFilter(name: "CIColorControls") else {
       return Envelope.failure(.executionError, "Failed to create filter")
     }
@@ -552,6 +561,9 @@ private func applyFilter(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let i = input.intensity, !(i >= 0.0 && i <= 1.0) {
+      return Envelope.failure(.invalidArgs, "intensity must be between 0.0 and 1.0")
+    }
     let ciImage = CIImage(cgImage: image)
     let intensity = input.intensity ?? 1.0
     let (filterName, params): (String, [String: Any]) = {
@@ -647,6 +659,11 @@ private func addWatermark(_ args: String) -> String {
     }
     if let o = input.opacity, !(o >= 0.0 && o <= 1.0) {
       return Envelope.failure(.invalidArgs, "opacity must be between 0.0 and 1.0")
+    }
+    let validPositions = ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
+    if let p = input.position, !validPositions.contains(p) {
+      return Envelope.failure(
+        .invalidArgs, "position must be one of: \(validPositions.joined(separator: ", "))")
     }
     let (w, h) = (image.width, image.height)
     let opacity = CGFloat(input.opacity ?? 0.5)
