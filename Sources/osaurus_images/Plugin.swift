@@ -189,9 +189,9 @@ private func imageFormat(_ path: String) -> UTType? {
 private func hexToRGB(_ hex: String) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {
   let hex = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
     of: "#", with: "")
-  guard hex.count == 6 else { return nil }
+  guard hex.count == 6, hex.allSatisfy(\.isHexDigit) else { return nil }
   var rgb: UInt64 = 0
-  Scanner(string: hex).scanHexInt64(&rgb)
+  guard Scanner(string: hex).scanHexInt64(&rgb) else { return nil }
   return (
     CGFloat((rgb >> 16) & 0xFF) / 255, CGFloat((rgb >> 8) & 0xFF) / 255, CGFloat(rgb & 0xFF) / 255
   )
@@ -602,15 +602,18 @@ private func extractColors(_ args: String) -> String {
     if let c = input.count, c <= 0 {
       return Envelope.failure(.invalidArgs, "count must be a positive integer")
     }
-    guard let provider = image.dataProvider, let data = provider.data,
-      let ptr = CFDataGetBytePtr(data)
-    else {
-      return Envelope.failure(.executionError, "Failed to read image data")
-    }
     let count = input.count ?? 5
     let (w, h) = (image.width, image.height)
-    let bpp = image.bitsPerPixel / 8
-    let bpr = image.bytesPerRow
+
+    // Redraw into a known RGBA8 layout so sampling is valid regardless of the
+    // source pixel format (grayscale, CMYK, 16-bit, etc.).
+    guard let ctx = createContext(w, h), let ctxData = ctx.data else {
+      return Envelope.failure(.executionError, "Failed to read image data")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let ptr = ctxData.assumingMemoryBound(to: UInt8.self)
+    let bpp = ctx.bitsPerPixel / 8
+    let bpr = ctx.bytesPerRow
     let (stepX, stepY) = (max(1, w / 50), max(1, h / 50))
 
     var colorCounts: [String: Int] = [:]
