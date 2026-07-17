@@ -50,6 +50,30 @@ private enum PathResult {
   case failure(String)
 }
 
+/// Canonicalizes a path by standardizing it and resolving symlinks on the
+/// deepest existing ancestor, so containment checks hold for paths that do
+/// not exist yet.
+private func canonicalizedPath(_ path: String) -> String {
+  var url = URL(fileURLWithPath: normalizePath(path)).standardizedFileURL
+  var missing: [String] = []
+  let fm = FileManager.default
+  while (try? fm.attributesOfItem(atPath: url.path)) == nil, url.pathComponents.count > 1 {
+    missing.append(url.lastPathComponent)
+    url = url.deletingLastPathComponent()
+  }
+  var resolved = url.resolvingSymlinksInPath()
+  for component in missing.reversed() {
+    resolved.appendPathComponent(component)
+  }
+  return resolved.standardizedFileURL.path
+}
+
+private func isContained(_ path: String, in root: String) -> Bool {
+  let p = canonicalizedPath(path)
+  let r = canonicalizedPath(root)
+  return p == r || p.hasPrefix(r.hasSuffix("/") ? r : r + "/")
+}
+
 private func resolvePath(_ path: String, context: FolderContext?) -> PathResult {
   // If no context, assume absolute path
   guard let workingDir = context?.working_directory else {
@@ -63,12 +87,11 @@ private func resolvePath(_ path: String, context: FolderContext?) -> PathResult 
   let resolvedPath = normalizePath("\(workingDir)/\(cleanPath)")
 
   // Security: ensure path stays within working directory
-  let normalizedWorkingDir = normalizePath(workingDir)
-  guard resolvedPath.hasPrefix(normalizedWorkingDir) else {
+  guard isContained(resolvedPath, in: workingDir) else {
     return .failure("Path outside working directory")
   }
 
-  return .success(resolvedPath)
+  return .success(canonicalizedPath(resolvedPath))
 }
 
 private func fileExists(_ path: String) -> Bool {
