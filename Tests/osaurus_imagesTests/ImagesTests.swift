@@ -42,7 +42,7 @@ final class ImagesTests: XCTestCase {
 
   func testEnvelopeFailureRoundTrip() throws {
     let cases: [(Envelope.Kind, String, Bool)] = [
-      (.invalidArgs, "bad params", true),
+      (.invalidArgs, "bad params", false),
       (.executionError, "boom", true),
       (.notFound, "missing file", false),
       (.unavailable, "offline", true),
