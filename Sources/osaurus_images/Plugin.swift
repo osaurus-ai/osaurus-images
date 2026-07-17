@@ -860,7 +860,9 @@ private func roundCorners(_ args: String) -> String {
 
 // MARK: - Plugin Infrastructure
 
-nonisolated(unsafe) private let tools: [String: (String) -> String] = [
+/// Exposed as `internal` (not `private`) so unit tests can invoke tools via
+/// `@testable import osaurus_images`.
+nonisolated(unsafe) let tools: [String: (String) -> String] = [
   "convert_image": convertImage,
   "optimize_image": optimizeImage,
   "rotate_image": rotateImage,
@@ -882,7 +884,7 @@ let imagesManifestJSON = """
   {
     "plugin_id": "osaurus.images",
     "name": "Images",
-    "version": "0.1.0",
+    "version": "1.0.4",
     "description": "Image manipulation, conversion, and optimization tools",
     "license": "MIT",
     "authors": [],
