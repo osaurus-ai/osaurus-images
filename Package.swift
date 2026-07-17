@@ -24,6 +24,7 @@ let package = Package(
             dependencies: [
                 "osaurus_images",
                 .product(name: "OsaurusPluginKit", package: "osaurus-plugin-sdk"),
+                .product(name: "OsaurusPluginTestSupport", package: "osaurus-plugin-sdk"),
             ],
             path: "Tests/osaurus_imagesTests"
         )
