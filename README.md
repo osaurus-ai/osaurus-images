@@ -337,7 +337,7 @@ swift build -c release
 ### Test
 
 ```bash
-swift test_plugin.swift
+swift test
 ```
 
 ### Extract Manifest
