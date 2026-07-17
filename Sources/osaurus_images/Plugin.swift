@@ -126,14 +126,35 @@ private func loadImage(_ path: String) -> ImageResult {
 private func saveImage(_ image: CGImage, to path: String, format: UTType, quality: CGFloat = 1.0)
   -> Bool
 {
-  guard
-    let dest = CGImageDestinationCreateWithURL(
-      URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
-    )
-  else { return false }
-  CGImageDestinationAddImage(
-    dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-  return CGImageDestinationFinalize(dest)
+  saveImageDestination(to: path) { tempURL in
+    guard
+      let dest = CGImageDestinationCreateWithURL(
+        tempURL as CFURL, format.identifier as CFString, 1, nil
+      )
+    else { return false }
+    CGImageDestinationAddImage(
+      dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+    return CGImageDestinationFinalize(dest)
+  }
+}
+
+/// Writes to a temp file in the destination's directory, then renames it over
+/// the target so the destination is never left partially written.
+private func saveImageDestination(to path: String, write: (URL) -> Bool) -> Bool {
+  let url = URL(fileURLWithPath: path)
+  let tempURL = url.deletingLastPathComponent()
+    .appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+  guard write(tempURL) else {
+    try? FileManager.default.removeItem(at: tempURL)
+    return false
+  }
+  do {
+    _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
+    return true
+  } catch {
+    try? FileManager.default.removeItem(at: tempURL)
+    return false
+  }
 }
 
 private func createContext(_ width: Int, _ height: Int, _ colorSpace: CGColorSpace? = nil)
@@ -475,15 +496,16 @@ private func stripMetadata(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     _, image, path, format in
-    guard
-      let dest = CGImageDestinationCreateWithURL(
-        URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
-      )
-    else {
-      return Envelope.failure(.executionError, "Failed to create image destination")
+    let saved = saveImageDestination(to: path) { tempURL in
+      guard
+        let dest = CGImageDestinationCreateWithURL(
+          tempURL as CFURL, format.identifier as CFString, 1, nil
+        )
+      else { return false }
+      CGImageDestinationAddImage(dest, image, nil)
+      return CGImageDestinationFinalize(dest)
     }
-    CGImageDestinationAddImage(dest, image, nil)
-    guard CGImageDestinationFinalize(dest) else {
+    guard saved else {
       return Envelope.failure(.executionError, "Failed to save image")
     }
     return jsonSuccess(["message": "Metadata stripped successfully"])
