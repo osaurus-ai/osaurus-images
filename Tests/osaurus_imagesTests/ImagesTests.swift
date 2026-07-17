@@ -1,3 +1,4 @@
+import OsaurusPluginKit
 import XCTest
 
 @testable import osaurus_images
@@ -45,7 +46,8 @@ final class ImagesTests: XCTestCase {
       (.invalidArgs, "bad params", false),
       (.executionError, "boom", true),
       (.notFound, "missing file", false),
-      (.unavailable, "offline", true),
+      (.permissionDenied, "no access", false),
+      (.timeout, "too slow", true),
     ]
     for (kind, message, expectedRetryable) in cases {
       let json = Envelope.failure(kind, message)

@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import ImageIO
+import OsaurusPluginKit
 import UniformTypeIdentifiers
 
 // MARK: - JSON Helpers
@@ -10,7 +11,7 @@ private func jsonSuccess(_ fields: [String: Any] = [:]) -> String {
   var parts = ["\"success\": true"]
   for (key, value) in fields {
     switch value {
-    case let s as String: parts.append("\"\(key)\": \"\(escapeJSON(s))\"")
+    case let s as String: parts.append("\"\(key)\": \"\(Envelope.escape(s))\"")
     case let b as Bool: parts.append("\"\(key)\": \(b)")
     case let i as Int: parts.append("\"\(key)\": \(i)")
     case let d as Double: parts.append("\"\(key)\": \(d)")
@@ -18,19 +19,6 @@ private func jsonSuccess(_ fields: [String: Any] = [:]) -> String {
     }
   }
   return "{\(parts.joined(separator: ", "))}"
-}
-
-private func escapeJSON(_ string: String) -> String {
-  string.reduce(into: "") { result, char in
-    switch char {
-    case "\"": result += "\\\""
-    case "\\": result += "\\\\"
-    case "\n": result += "\\n"
-    case "\r": result += "\\r"
-    case "\t": result += "\\t"
-    default: result.append(char)
-    }
-  }
 }
 
 // MARK: - Folder Context
@@ -50,30 +38,6 @@ private enum PathResult {
   case failure(String)
 }
 
-/// Canonicalizes a path by standardizing it and resolving symlinks on the
-/// deepest existing ancestor, so containment checks hold for paths that do
-/// not exist yet.
-private func canonicalizedPath(_ path: String) -> String {
-  var url = URL(fileURLWithPath: normalizePath(path)).standardizedFileURL
-  var missing: [String] = []
-  let fm = FileManager.default
-  while (try? fm.attributesOfItem(atPath: url.path)) == nil, url.pathComponents.count > 1 {
-    missing.append(url.lastPathComponent)
-    url = url.deletingLastPathComponent()
-  }
-  var resolved = url.resolvingSymlinksInPath()
-  for component in missing.reversed() {
-    resolved.appendPathComponent(component)
-  }
-  return resolved.standardizedFileURL.path
-}
-
-private func isContained(_ path: String, in root: String) -> Bool {
-  let p = canonicalizedPath(path)
-  let r = canonicalizedPath(root)
-  return p == r || p.hasPrefix(r.hasSuffix("/") ? r : r + "/")
-}
-
 private func resolvePath(_ path: String, context: FolderContext?) -> PathResult {
   // If no context, assume absolute path
   guard let workingDir = context?.working_directory else {
@@ -87,11 +51,11 @@ private func resolvePath(_ path: String, context: FolderContext?) -> PathResult 
   let resolvedPath = normalizePath("\(workingDir)/\(cleanPath)")
 
   // Security: ensure path stays within working directory
-  guard isContained(resolvedPath, in: workingDir) else {
+  guard PathSafety.isContained(resolvedPath, in: workingDir) else {
     return .failure("Path outside working directory")
   }
 
-  return .success(canonicalizedPath(resolvedPath))
+  return .success(PathSafety.canonicalize(resolvedPath))
 }
 
 private func fileExists(_ path: String) -> Bool {
@@ -138,8 +102,9 @@ private func saveImage(_ image: CGImage, to path: String, format: UTType, qualit
   }
 }
 
-/// Writes to a temp file in the destination's directory, then renames it over
-/// the target so the destination is never left partially written.
+/// Writes to a temp file in the destination's directory, then swaps it over
+/// the target via `PathSafety.atomicReplace` so the destination is never left
+/// partially written.
 private func saveImageDestination(to path: String, write: (URL) -> Bool) -> Bool {
   let url = URL(fileURLWithPath: path)
   let tempURL = url.deletingLastPathComponent()
@@ -149,7 +114,7 @@ private func saveImageDestination(to path: String, write: (URL) -> Bool) -> Bool
     return false
   }
   do {
-    _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL)
+    try PathSafety.atomicReplace(at: path, withItemAt: tempURL.path)
     return true
   } catch {
     try? FileManager.default.removeItem(at: tempURL)
@@ -327,8 +292,12 @@ private func flipImage(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
     let dir = input.direction.lowercased()
-    guard dir == "horizontal" || dir == "vertical" else {
-      return Envelope.failure(.invalidArgs, "Direction must be 'horizontal' or 'vertical'")
+    do {
+      try ArgValidation.enumValue(dir, field: "direction", allowed: ["horizontal", "vertical"])
+    } catch let failure as EnvelopeFailure {
+      return failure.render()
+    } catch {
+      return Envelope.failure(.invalidArgs, "direction must be 'horizontal' or 'vertical'")
     }
     let (w, h) = (image.width, image.height)
     guard let ctx = createContext(w, h, image.colorSpace) else {
@@ -468,7 +437,7 @@ private func getImageInfo(_ args: String) -> String {
   if let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
     var parts: [String] = []
     if let v = exifDict[kCGImagePropertyExifDateTimeOriginal] as? String {
-      parts.append("\"date_time\": \"\(escapeJSON(v))\"")
+      parts.append("\"date_time\": \"\(Envelope.escape(v))\"")
     }
     if let v = exifDict[kCGImagePropertyExifExposureTime] as? Double {
       parts.append("\"exposure_time\": \(v)")
@@ -661,9 +630,15 @@ private func addWatermark(_ args: String) -> String {
       return Envelope.failure(.invalidArgs, "opacity must be between 0.0 and 1.0")
     }
     let validPositions = ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
-    if let p = input.position, !validPositions.contains(p) {
-      return Envelope.failure(
-        .invalidArgs, "position must be one of: \(validPositions.joined(separator: ", "))")
+    if let p = input.position {
+      do {
+        try ArgValidation.enumValue(p, field: "position", allowed: validPositions)
+      } catch let failure as EnvelopeFailure {
+        return failure.render()
+      } catch {
+        return Envelope.failure(
+          .invalidArgs, "position must be one of: \(validPositions.joined(separator: ", "))")
+      }
     }
     let (w, h) = (image.width, image.height)
     let opacity = CGFloat(input.opacity ?? 0.5)
