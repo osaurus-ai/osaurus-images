@@ -860,7 +860,7 @@ let imagesManifestJSON = """
   {
     "plugin_id": "osaurus.images",
     "name": "Images",
-    "version": "1.0.4",
+    "version": "1.1.0",
     "description": "Image manipulation, conversion, and optimization tools",
     "license": "MIT",
     "authors": [],

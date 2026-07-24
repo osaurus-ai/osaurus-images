@@ -297,6 +297,6 @@ final class ImagesToolTests: XCTestCase {
     let data = try XCTUnwrap(imagesManifestJSON.data(using: .utf8))
     let manifest = try XCTUnwrap(
       try JSONSerialization.jsonObject(with: data) as? [String: Any])
-    XCTAssertEqual(manifest["version"] as? String, "1.0.4")
+    XCTAssertEqual(manifest["version"] as? String, "1.1.0")
   }
 }
