@@ -2,6 +2,8 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import ImageIO
+import OsaurusPluginABI
+import OsaurusPluginKit
 import UniformTypeIdentifiers
 
 // MARK: - JSON Helpers
@@ -10,7 +12,7 @@ private func jsonSuccess(_ fields: [String: Any] = [:]) -> String {
   var parts = ["\"success\": true"]
   for (key, value) in fields {
     switch value {
-    case let s as String: parts.append("\"\(key)\": \"\(escapeJSON(s))\"")
+    case let s as String: parts.append("\"\(key)\": \"\(Envelope.escape(s))\"")
     case let b as Bool: parts.append("\"\(key)\": \(b)")
     case let i as Int: parts.append("\"\(key)\": \(i)")
     case let d as Double: parts.append("\"\(key)\": \(d)")
@@ -18,19 +20,6 @@ private func jsonSuccess(_ fields: [String: Any] = [:]) -> String {
     }
   }
   return "{\(parts.joined(separator: ", "))}"
-}
-
-private func escapeJSON(_ string: String) -> String {
-  string.reduce(into: "") { result, char in
-    switch char {
-    case "\"": result += "\\\""
-    case "\\": result += "\\\\"
-    case "\n": result += "\\n"
-    case "\r": result += "\\r"
-    case "\t": result += "\\t"
-    default: result.append(char)
-    }
-  }
 }
 
 // MARK: - Folder Context
@@ -63,12 +52,11 @@ private func resolvePath(_ path: String, context: FolderContext?) -> PathResult 
   let resolvedPath = normalizePath("\(workingDir)/\(cleanPath)")
 
   // Security: ensure path stays within working directory
-  let normalizedWorkingDir = normalizePath(workingDir)
-  guard resolvedPath.hasPrefix(normalizedWorkingDir) else {
+  guard PathSafety.isContained(resolvedPath, in: workingDir) else {
     return .failure("Path outside working directory")
   }
 
-  return .success(resolvedPath)
+  return .success(PathSafety.canonicalize(resolvedPath))
 }
 
 private func fileExists(_ path: String) -> Bool {
@@ -103,14 +91,36 @@ private func loadImage(_ path: String) -> ImageResult {
 private func saveImage(_ image: CGImage, to path: String, format: UTType, quality: CGFloat = 1.0)
   -> Bool
 {
-  guard
-    let dest = CGImageDestinationCreateWithURL(
-      URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
-    )
-  else { return false }
-  CGImageDestinationAddImage(
-    dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-  return CGImageDestinationFinalize(dest)
+  saveImageDestination(to: path) { tempURL in
+    guard
+      let dest = CGImageDestinationCreateWithURL(
+        tempURL as CFURL, format.identifier as CFString, 1, nil
+      )
+    else { return false }
+    CGImageDestinationAddImage(
+      dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+    return CGImageDestinationFinalize(dest)
+  }
+}
+
+/// Writes to a temp file in the destination's directory, then swaps it over
+/// the target via `PathSafety.atomicReplace` so the destination is never left
+/// partially written.
+private func saveImageDestination(to path: String, write: (URL) -> Bool) -> Bool {
+  let url = URL(fileURLWithPath: path)
+  let tempURL = url.deletingLastPathComponent()
+    .appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+  guard write(tempURL) else {
+    try? FileManager.default.removeItem(at: tempURL)
+    return false
+  }
+  do {
+    try PathSafety.atomicReplace(at: path, withItemAt: tempURL.path)
+    return true
+  } catch {
+    try? FileManager.default.removeItem(at: tempURL)
+    return false
+  }
 }
 
 private func createContext(_ width: Int, _ height: Int, _ colorSpace: CGColorSpace? = nil)
@@ -145,9 +155,9 @@ private func imageFormat(_ path: String) -> UTType? {
 private func hexToRGB(_ hex: String) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {
   let hex = hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
     of: "#", with: "")
-  guard hex.count == 6 else { return nil }
+  guard hex.count == 6, hex.allSatisfy(\.isHexDigit) else { return nil }
   var rgb: UInt64 = 0
-  Scanner(string: hex).scanHexInt64(&rgb)
+  guard Scanner(string: hex).scanHexInt64(&rgb) else { return nil }
   return (
     CGFloat((rgb >> 16) & 0xFF) / 255, CGFloat((rgb >> 8) & 0xFF) / 255, CGFloat(rgb & 0xFF) / 255
   )
@@ -283,8 +293,12 @@ private func flipImage(_ args: String) -> String {
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
     let dir = input.direction.lowercased()
-    guard dir == "horizontal" || dir == "vertical" else {
-      return Envelope.failure(.invalidArgs, "Direction must be 'horizontal' or 'vertical'")
+    do {
+      try ArgValidation.enumValue(dir, field: "direction", allowed: ["horizontal", "vertical"])
+    } catch let failure as EnvelopeFailure {
+      return failure.render()
+    } catch {
+      return Envelope.failure(.invalidArgs, "direction must be 'horizontal' or 'vertical'")
     }
     let (w, h) = (image.width, image.height)
     guard let ctx = createContext(w, h, image.colorSpace) else {
@@ -424,7 +438,7 @@ private func getImageInfo(_ args: String) -> String {
   if let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
     var parts: [String] = []
     if let v = exifDict[kCGImagePropertyExifDateTimeOriginal] as? String {
-      parts.append("\"date_time\": \"\(escapeJSON(v))\"")
+      parts.append("\"date_time\": \"\(Envelope.escape(v))\"")
     }
     if let v = exifDict[kCGImagePropertyExifExposureTime] as? Double {
       parts.append("\"exposure_time\": \(v)")
@@ -452,15 +466,16 @@ private func stripMetadata(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     _, image, path, format in
-    guard
-      let dest = CGImageDestinationCreateWithURL(
-        URL(fileURLWithPath: path) as CFURL, format.identifier as CFString, 1, nil
-      )
-    else {
-      return Envelope.failure(.executionError, "Failed to create image destination")
+    let saved = saveImageDestination(to: path) { tempURL in
+      guard
+        let dest = CGImageDestinationCreateWithURL(
+          tempURL as CFURL, format.identifier as CFString, 1, nil
+        )
+      else { return false }
+      CGImageDestinationAddImage(dest, image, nil)
+      return CGImageDestinationFinalize(dest)
     }
-    CGImageDestinationAddImage(dest, image, nil)
-    guard CGImageDestinationFinalize(dest) else {
+    guard saved else {
       return Envelope.failure(.executionError, "Failed to save image")
     }
     return jsonSuccess(["message": "Metadata stripped successfully"])
@@ -477,6 +492,15 @@ private func adjustColors(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let b = input.brightness, !(b >= -1.0 && b <= 1.0) {
+      return Envelope.failure(.invalidArgs, "brightness must be between -1.0 and 1.0")
+    }
+    if let c = input.contrast, !(c >= 0.0 && c <= 2.0) {
+      return Envelope.failure(.invalidArgs, "contrast must be between 0.0 and 2.0")
+    }
+    if let s = input.saturation, !(s >= 0.0 && s <= 2.0) {
+      return Envelope.failure(.invalidArgs, "saturation must be between 0.0 and 2.0")
+    }
     guard let filter = CIFilter(name: "CIColorControls") else {
       return Envelope.failure(.executionError, "Failed to create filter")
     }
@@ -507,6 +531,9 @@ private func applyFilter(_ args: String) -> String {
   }
   return withImage(args, as: Args.self, path: \.input_path, context: \._context) {
     input, image, path, format in
+    if let i = input.intensity, !(i >= 0.0 && i <= 1.0) {
+      return Envelope.failure(.invalidArgs, "intensity must be between 0.0 and 1.0")
+    }
     let ciImage = CIImage(cgImage: image)
     let intensity = input.intensity ?? 1.0
     let (filterName, params): (String, [String: Any]) = {
@@ -557,15 +584,18 @@ private func extractColors(_ args: String) -> String {
     if let c = input.count, c <= 0 {
       return Envelope.failure(.invalidArgs, "count must be a positive integer")
     }
-    guard let provider = image.dataProvider, let data = provider.data,
-      let ptr = CFDataGetBytePtr(data)
-    else {
-      return Envelope.failure(.executionError, "Failed to read image data")
-    }
     let count = input.count ?? 5
     let (w, h) = (image.width, image.height)
-    let bpp = image.bitsPerPixel / 8
-    let bpr = image.bytesPerRow
+
+    // Redraw into a known RGBA8 layout so sampling is valid regardless of the
+    // source pixel format (grayscale, CMYK, 16-bit, etc.).
+    guard let ctx = createContext(w, h), let ctxData = ctx.data else {
+      return Envelope.failure(.executionError, "Failed to read image data")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let ptr = ctxData.assumingMemoryBound(to: UInt8.self)
+    let bpp = ctx.bitsPerPixel / 8
+    let bpr = ctx.bytesPerRow
     let (stepX, stepY) = (max(1, w / 50), max(1, h / 50))
 
     var colorCounts: [String: Int] = [:]
@@ -599,6 +629,17 @@ private func addWatermark(_ args: String) -> String {
     }
     if let o = input.opacity, !(o >= 0.0 && o <= 1.0) {
       return Envelope.failure(.invalidArgs, "opacity must be between 0.0 and 1.0")
+    }
+    let validPositions = ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
+    if let p = input.position {
+      do {
+        try ArgValidation.enumValue(p, field: "position", allowed: validPositions)
+      } catch let failure as EnvelopeFailure {
+        return failure.render()
+      } catch {
+        return Envelope.failure(
+          .invalidArgs, "position must be one of: \(validPositions.joined(separator: ", "))")
+      }
     }
     let (w, h) = (image.width, image.height)
     let opacity = CGFloat(input.opacity ?? 0.5)
@@ -795,7 +836,9 @@ private func roundCorners(_ args: String) -> String {
 
 // MARK: - Plugin Infrastructure
 
-nonisolated(unsafe) private let tools: [String: (String) -> String] = [
+/// Exposed as `internal` (not `private`) so unit tests can invoke tools via
+/// `@testable import osaurus_images`.
+nonisolated(unsafe) let tools: [String: (String) -> String] = [
   "convert_image": convertImage,
   "optimize_image": optimizeImage,
   "rotate_image": rotateImage,
@@ -817,7 +860,7 @@ let imagesManifestJSON = """
   {
     "plugin_id": "osaurus.images",
     "name": "Images",
-    "version": "0.1.0",
+    "version": "1.0.4",
     "description": "Image manipulation, conversion, and optimization tools",
     "license": "MIT",
     "authors": [],
@@ -845,54 +888,36 @@ let imagesManifestJSON = """
   }
   """
 
-private func makeCString(_ s: String) -> UnsafePointer<CChar>? {
-  guard let ptr = strdup(s) else { return nil }
-  return UnsafePointer(ptr)
-}
-
-private typealias PluginCtx = UnsafeMutableRawPointer
-private typealias FreeStringFn = @convention(c) (UnsafePointer<CChar>?) -> Void
-private typealias InitFn = @convention(c) () -> PluginCtx?
-private typealias DestroyFn = @convention(c) (PluginCtx?) -> Void
-private typealias ManifestFn = @convention(c) (PluginCtx?) -> UnsafePointer<CChar>?
-private typealias InvokeFn =
-  @convention(c) (PluginCtx?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?)
-  -> UnsafePointer<CChar>?
-
-private struct PluginAPI {
-  var free_string: FreeStringFn?
-  var `init`: InitFn?
-  var destroy: DestroyFn?
-  var get_manifest: ManifestFn?
-  var invoke: InvokeFn?
-}
-
 // Dummy context - we don't need state but API requires non-nil
 private class PluginContext {}
 
-nonisolated(unsafe) private var api: PluginAPI = {
-  var api = PluginAPI()
-  api.free_string = { if let p = $0 { free(UnsafeMutableRawPointer(mutating: p)) } }
-  api.`init` = { Unmanaged.passRetained(PluginContext()).toOpaque() }
-  api.destroy = { if let p = $0 { Unmanaged<PluginContext>.fromOpaque(p).release() } }
-  api.get_manifest = { _ in makeCString(imagesManifestJSON) }
-  api.invoke = { _, typePtr, idPtr, payloadPtr in
+/// Stable storage for the plugin API table (the host keeps the pointer).
+nonisolated(unsafe) private var api = PluginEntry.makeAPI(
+  version: OsrABIVersion.v2,
+  init: { Unmanaged.passRetained(PluginContext()).toOpaque() },
+  destroy: { ctx in ctx.map { Unmanaged<PluginContext>.fromOpaque($0).release() } },
+  getManifest: { _ in osrMakeCString(imagesManifestJSON) },
+  invoke: { _, typePtr, idPtr, payloadPtr in
     guard let typePtr, let idPtr, let payloadPtr else { return nil }
     let type = String(cString: typePtr)
     let id = String(cString: idPtr)
     let payload = String(cString: payloadPtr)
     guard type == "tool" else {
-      return makeCString(Envelope.failure(.invalidArgs, "Unknown capability type"))
+      return osrMakeCString(Envelope.failure(.invalidArgs, "Unknown capability type"))
     }
     guard let tool = tools[id] else {
-      return makeCString(Envelope.failure(.notFound, "Unknown tool: \(id)"))
+      return osrMakeCString(Envelope.failure(.notFound, "Unknown tool: \(id)"))
     }
-    return makeCString(tool(payload))
+    return osrMakeCString(tool(payload))
   }
-  return api
-}()
+)
+
+@_cdecl("osaurus_plugin_entry_v2")
+public func osaurus_plugin_entry_v2(_ host: UnsafeRawPointer?) -> UnsafeRawPointer? {
+  PluginEntry.enterV2(host, api: &api)
+}
 
 @_cdecl("osaurus_plugin_entry")
 public func osaurus_plugin_entry() -> UnsafeRawPointer? {
-  UnsafeRawPointer(&api)
+  PluginEntry.enterV1(api: &api)
 }
